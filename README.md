@@ -4,13 +4,13 @@ This readme explains the performance evaluation process of `poisson-solver` and 
 ## poisson-solver
 ### Local
 `poisson-solver` is modified in the `benchmarks` branch to accomodate for this evaluation.
-The benchamrks and runners for them are also present in that branch.
+The benchmarks and runners for them are also present in that branch.
 
 The following metrics will be measured:
 1. Buffer copy duration
     - Host->device and device->host or
-    - in case device buffers are supplied, the device<->device copy.
-        - Device<->device copies are used to slice off ghost cells.
+    - in case device buffers are supplied (via GPU API), the device<->device copy.
+        - (Device<->device copies are used to slice off ghost cells)
 2. FFT execution duration
 3. Kernel execution duration
 4. Total time of `Execute()` (or `ExecuteGPU()`)
@@ -38,7 +38,7 @@ TODO - Not finished, only rough ideas
 [This fork](https://github.com/mntjams/PoisFFT) of `PoisFFT` contains the changes for the evaluation along with the benchmarks themselves and runners for them.
 Only the _total time to execute one iteration_ is measured as `PoisFFT` software architecture makes it very tedious to incorporate all the metrics present in `poisson-solver` evaluation.
 
-The runner for `PoisFFT` evaluation also executes on all the different combinations (apart from those not supported by `PoisFFT`, e.g., GPU API).
+The runner for `PoisFFT` evaluation also executes on all the different combinations of solvers (apart from those not supported by `PoisFFT`, e.g., GPU API).
 In addition to those it also runs with 1, 2, 4, 8, 16, 32 and 64 cores.
 
 ### Distributed
