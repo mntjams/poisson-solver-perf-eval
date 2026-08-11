@@ -1,0 +1,123 @@
+---
+title: "poisson-solver Performance Evaluation"
+author: "Matous Zatloukal"
+output: pdf_document
+urlcolor: blue
+bibliography: bibliography.bib
+csl: iso690-numeric-en.csl
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+```
+
+# Problem Description
+## Motivation behind `poisson-solver`
+`PoisFFT` is a Fortran library that solves the Poisson equation using the Fast Fourier Transform [@PoisFFT].
+It is a part of [`ELMM`](https://bitbucket.org/LadaF/elmm/src/master/) (Extended Large Eddy Microscale Model), a LES (Large Eddy Simulation) model for atmospheric flows.
+
+`PoisFFT` is written entirely in Fortran and utilizes only CPUs.
+It is parallelized using `OpenMP` in a single-node (local) configuration and using `MPI` in distributed configuration.
+Furthermore, it offers a hybrid `MPI`/`OpenMP` parallelization in distributed configurations.
+`PoisFFT` requires the users to first define a domain (number of grid cells, grid lengths, boundary conditions, etc.) and then allows them to repeatedly solve the Poisson equation with this domain configuration by supplying the right-hand side of the equation $\Delta \phi = b$.
+
+The solving of the equation is a simple pipeline that can be summarized as follows:
+
+1.  Apply a forward FFT on the whole RHS,
+2.  divide each point in the RHS by a sum of pre-computed eigenvalues,
+3.  apply a backward FFT on the whole RHS and
+4.  normalize the result to get the $\Phi$.
+
+While for different combinations of BCs (boundary conditions) the pipeline may slightly vary (e.g., the real RHS is first converted into a complex RHS or different types of FFT are applied separately to 1D pencils in one direction and then to 2D slabs in the other directions) and for distributed solvers it is more complicated, due to the requirements of data locality for FFT libraries, the core steps are still present.
+Apart from the FFT steps, `PoisFFT` is a 1-point stencil computation which makes it a great candidate for a rewrite into C++ and CUDA to take advantage of the GPUs available on the MFF cluster `chimera`.
+
+`poisson-solver` is exactly this rewrite which we've done as a part of Research Project (NPRG070).
+As stated before, it utilizes GPUs which are more suited for this type of a problem.
+For the distributed communication it also utilizes `MPI`.
+
+## Local Solvers Evaluation
+For non-distributed solvers, we want to determine the speedup of `poisson-solver` compared to `PoisFFT` in all possible combinations of:
+
+1. Precision (double or float),
+2. dimensionality of the grid (1, 2 or 3),
+3. uniformity of the grid on the Z axis and
+    - Both solvers support the option to have the grid cell sizes nonuniform in the Z axis, this requires a different solving method.
+4. boundary conditions (dependent on the dimensionality and uniformity of Z axis).
+
+In addition to those, `PoisFFT` will also be measured using different combination of cores (16, 32 and 48).
+
+We suspect that the buffer copying between host and device will be the bottleneck in `poisson-solver`.
+Therefore, `poisson-solver` provides additional API that accepts device buffers and copies buffers only between devices.
+We also want to do the previous measurements using this API to simulate the situation where other parts of `ELMM` are rewritten and the inputs for `poisson-solver` are already on the device.
+
+To help us determine the bottleneck of the pipeline for further research focus, we will measure the following in `poisson-solver`:
+
+1. Time spent copying buffers,
+2. time spent executing FFTs,
+3. time spent on our kernel execution (e.g., division by eigenvalues) and
+4. total time spent solving the equation.
+
+TODO - Why
+
+Only the total time spent solving the equation will be measured for `PoisFFT`.
+
+## Distributed Solvers Evaluation
+
+TODO - Not finished, only rough ideas
+
+- Measure only 3D solvers, distributed solvers won't realistically be run on <3D problems.
+- Measure strong scaling with increasing amount of nodes.
+    - Node selection? I don't think we have many BW nodes.
+- Measure weak scaling with increasing amount of nodes.
+
+## ELMM Evaluation
+TODO - How to measure in ELMM?
+
+- ELMM already outputs the total time to execute a simulation and time spent in Poisson solver
+    - It's very bare-bones but maybe it can be used?
+
+# Benchmark Descriptions
+The benchmark source code and runner scripts for `poisson-solver` can be found in the [`benchmarks` branch](https://gitlab.mff.cuni.cz/d3s/hpc/poisson-solver/-/tree/benchmarks?ref_type=heads) of `poisson-solver`.
+The benchmark source code and runner scripts for `PoisFFT` can be found in [my `PoisFFT` fork](https://github.com/mntjams/PoisFFT).
+
+## Local Solvers
+The source code for `poisson-solver` is in `poisson-solver/tests/benchmarks/benchmark.cpp` and for `PoisFFT` in `PoisFFT/src/benchmark.f90`.
+The runner script for `poisson-solver` is in `poisson-solver/local_benchmark.sh` and for `PoisFFT` in `PoisFFT/local_benchmark.sh` (both have their `chimera` SLURM launchers in `run_local_benchmark.sh`).
+
+The runner scripts loop through all the aforementioned combinations of configurations and for each one launch the benchmark.
+The benchmark then loops over all given grid sizes and for each one constructs the solver and repeatedly measures the aforementioned metrics of one iteration (for given amount of iterations).
+
+### poisson-solver
+The total time is measured using `std::steady_clock` as this clock is guaranteed to be monotonic (unlike `std::high_resolution_clock` which may be aliased to non-monotonic `std::system_clock`).
+The buffer copy time and time to execute our own kernels is measured using `CUDAScopedTimer` and everything else using `HybridScopedTimer`.
+Both scoped timers accept a reference in their constructor into which they accumulate the measured time.
+Both also start the measurement in the constructor and stop it in the destructor.
+
+`CUDAScopedTimer` uses CUDA events to measure the time of operations submitted into the CUDA stream (i.e., strictly GPU-related operations).
+
+`HybridScopedTimer` uses `cudaDeviceSynchronize()` along with `std::steady_clock` to measure the time of operations executed by both CPU and GPU.
+By calling `cudaDeviceSynchronize()` before starting and then before stopping the measurement, we ensure we measure only the GPU kernels and all other CPU operations in the given scope.
+The `HybridScopedTimer` is utilized for measurements where we can't guarantee only CPU or only GPU usage and need to therefore measure both (e.g., calls to an external library).
+
+### PoisFFT
+The total time is measured using `SYSTEM_CLOCK`.
+
+## Distributed Solvers
+TODO
+
+# Platform
+
+TODO - This is currently not true, we performed them on volta05 - but the final measurement will be on bw01
+
+The local solver benchmarks were executed on the `bw01` node on `chimera` cluster.
+
+TODO - Delete if I really did it this way, modify below otherwise
+
+The distributed solver benchmarks were executed on nodes `bw01`, `volta02`, `volta03` and `volta05`.
+
+# Analysis
+
+## Local Solvers
+
+
+# References
