@@ -11,6 +11,91 @@ csl: iso690-numeric-en.csl
 library(tidyverse)
 ```
 
+```{r, include=FALSE}
+make_pretty_poisfft <- function (poisfft_times, num_cores) {
+   poisfft_times |>
+        rename(Dimension = dim,
+               Precision = precision,
+               Uniformity = solver_type,
+               API = api,
+               BCs = bc_name,
+               GridSize = grid_size,
+               Iteration = iteration,
+               TotalTime_ms = total_time_ms) |>
+        mutate(Cores = num_cores, API = paste(API, num_cores, "Cores", sep = " "))
+}
+
+make_pretty_poisson_solver <- function (poisson_solver_times) {
+   poisson_solver_times_pretty <- poisson_solver_times |>
+       select(-total_time_ms) |>
+       rename(Dimension = dim,
+              Precision = precision,
+              Uniformity = solver_type,
+              API = api,
+              BCs = bc_name,
+              GridSize = grid_size,
+              Iteration = iteration,
+              BufferCopyTime_ms = copy_time_ms,
+              ReshapeTime_ms = reshape_time_ms,
+              FFTTime_ms = fft_time_ms,
+              KernelTime_ms = kernel_time_ms,
+              # total_time_ms contains measurement overhead,
+              # use sum of individual times instead
+              TotalTime_ms = sum_time_ms) |>
+       mutate (API = paste("poisson-solver", API, sep = " "))
+}
+
+show_warmup_iters <- function(times) {
+    ggplot(times, aes (
+        x = Iteration,
+        y = TotalTime_ms,
+        )) +
+        geom_point(size = 1.5, alpha = 0.3) +
+        facet_wrap(vars(GridSize), scales = "free_y") +
+        scale_x_continuous(breaks = poisson_solver_examples$Iteration) +
+        labs(title = paste("Warm-up Iterations for",
+                           times$ExampleName,
+                           sep = " ")) +
+        theme_minimal()
+}
+
+with_highest_throughput <- function (all_cores) {
+    all_cores_with_throughput <- all_cores |>
+        mutate(throughput_cells_ms = (grid_size ^ dim) / total_time_ms)
+    num_cores_with_highest_throughput <- all_cores_with_throughput |>
+        group_by(cores) |>
+        summarize(avg_throughput_cells_ms = mean(throughput_cells_ms)) |>
+        arrange(desc(avg_throughput_cells_ms)) |>
+        # print() |>
+        slice_head() |>
+        pull(cores)
+    all_cores |> filter(cores == num_cores_with_highest_throughput)
+}
+
+add_metrics_to_poisfft <- function (poisfft_times) {
+    poisfft_times |>
+        mutate(
+            copy_times_ms = 0,
+            fft_times_ms = 0,
+            kernel_times_ms = 0
+            )
+}
+
+create_avgs <- function (merged_times) {
+    merged_times <- group_by(grid_size, api) |>
+        summarize(
+            avg_total_time_ms = mean(total_time_ms),
+            avg_copy_time_ms = mean(copy_times_ms),
+            avg_fft_time_ms = mean(fft_times_ms),
+            avg_kernel_time_ms = mean(kernel_times_ms)
+            ) |>
+        mutate(
+            avg_other = avg_total_time_ms -
+                (avg_copy_time_ms + avg_fft_time_ms + avg_kernel_time_ms)
+            )
+}
+```
+
 # Problem Description
 ## Motivation behind `poisson-solver`
 `PoisFFT` is a Fortran library that solves the Poisson equation using the Fast Fourier Transform [@PoisFFT].
@@ -57,9 +142,8 @@ To help us determine the bottleneck of the pipeline for further research focus, 
 3. time spent on our kernel execution (e.g., division by eigenvalues) and
 4. total time spent solving the equation.
 
-TODO - Why
-
 Only the total time spent solving the equation will be measured for `PoisFFT`.
+We cannot measure the individual metrics as `PoisFFT` has no buffer copying and the FFTs are sometimes interleaved with kernel execution inside `OpenMP` parallel blocks.
 
 ## Distributed Solvers Evaluation
 
@@ -115,9 +199,209 @@ TODO - Delete if I really did it this way, modify below otherwise
 
 The distributed solver benchmarks were executed on nodes `bw01`, `volta02`, `volta03` and `volta05`.
 
+TODO - Add better description of individual nodes, as well as compiler versions and CUDA versions.
+
 # Analysis
+```{r, include=FALSE}
+# TODO - Replace with bw01 measurements paths
+results_path <- "results"
+poisson_solver_path <- paste(
+    results_path,
+    "wrong-container-volta05-poisson-solver",
+    sep = "/"
+    )
+poisfft_path <- paste(
+    results_path,
+    "wrong-container-volta05-poisfft",
+    sep = "/"
+    )
+poisfft_cores_16_path <- paste(
+    poisfft_path,
+    "cores_16",
+    sep = "/"
+)
+poisfft_cores_32_path <- paste(
+    poisfft_path,
+    "cores_32",
+    sep = "/"
+)
+poisfft_cores_64_path <- paste(
+    poisfft_path,
+    "cores_64",
+    sep = "/"
+)
+poisfft_core_paths <- list(
+    "16" = poisfft_cores_16_path,
+    "32" = poisfft_cores_32_path,
+    "64" = poisfft_cores_64_path
+)
+```
 
 ## Local Solvers
 
+```{r, include=FALSE}
+all_poisson_solver_csv_files <- list.files(
+    path = poisson_solver_path,
+    patter = "*.csv",
+    full.names = TRUE
+)
+all_poisson_solver_times <- read_csv(all_poisson_solver_csv_files) |>
+    make_pretty_poisson_solver()
+
+all_poisfft_16_core_csv_files <- list.files(
+    path = poisfft_core_paths[["16"]],
+    patter = "*.csv",
+    full.names = TRUE
+)
+all_poisfft_32_core_csv_files <- list.files(
+    path = poisfft_core_paths[["32"]],
+    patter = "*.csv",
+    full.names = TRUE
+)
+all_poisfft_64_core_csv_files <- list.files(
+    path = poisfft_core_paths[["64"]],
+    patter = "*.csv",
+    full.names = TRUE
+)
+all_poisfft_16_core_times <- read_csv(all_poisfft_16_core_csv_files) |>
+    make_pretty_poisfft("16")
+all_poisfft_32_core_times <- read_csv(all_poisfft_32_core_csv_files) |>
+    make_pretty_poisfft("32")
+all_poisfft_64_core_times <- read_csv(all_poisfft_64_core_csv_files) |>
+    make_pretty_poisfft("64")
+all_poisfft_times <- bind_rows(
+    all_poisfft_16_core_times,
+    all_poisfft_32_core_times,
+    all_poisfft_64_core_times)
+
+all_times <- bind_rows(all_poisson_solver_times, all_poisfft_times)
+```
+
+
+### Warm-up and Outliers
+First, we will determine the amount of iterations until warm-up finishes and discard those.
+Due to how few measurements we have of one configuration, we will do this manually for pre-selected configurations and determine the number of warm-up iterations from those.
+The number of warm-up iterations shouldn't not differ between different solver configurations.
+
+Afterwards, we will determine if there are any outliers and discord those as well.
+
+```{r, message=FALSE}
+poisson_solver_1d_example <- all_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "1",
+           BCs == "P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 1D, Double Prec, Full Periodic, CPU API")
+poisson_solver_2d_float_example <- all_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "2",
+           BCs == "N | N | N | N",
+           Precision == "float") |>
+    mutate(ExampleName = "poisson-solver 2D, Float Prec, Full Neumann, CPU API")
+poisson_solver_3d_full_dirichlet_gpu_example <- all_times |>
+    filter(API == "poisson-solver GPU",
+           Dimension == "3",
+           BCs == "D | D | D | D | D | D",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, Full Dirichlet, GPU API")
+poisson_solver_3d_NsNsP_example <- all_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "P | P | Ns | Ns | P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, PNsP, CPU API")
+poisson_solver_nonuniform_z_example <- all_times |>
+    filter(API == "poisson-solver CPU",
+        BCs == "P | P | P | P | Ns | Ns",
+        Uniformity == "nonuniform_z",
+        Precision == "double") |>
+    mutate(ExampleName = "poisson-solver Nonuniform Z, Double Prec, PPNs, CPU API")
+
+show_warmup_iters(poisson_solver_1d_example)
+show_warmup_iters(poisson_solver_2d_float_example)
+show_warmup_iters(poisson_solver_3d_full_dirichlet_gpu_example)
+show_warmup_iters(poisson_solver_3d_NsNsP_example)
+show_warmup_iters(poisson_solver_nonuniform_z_example)
+
+ggplot(poisfft_examples[["16"]], aes (
+    x = iteration,
+    y = total_time_ms)) +
+    geom_point(size = 1.5, alpha = 0.5) +
+    facet_wrap(vars(grid_size), scales = "free_y") +
+    scale_x_continuous(breaks = poisfft_examples[["16"]]$iteration) +
+    labs(title = "PoisFFT 16 Cores") +
+    theme_minimal()
+
+ggplot(poisfft_examples[["32"]], aes (
+    x = iteration,
+    y = total_time_ms)) +
+    geom_point(size = 1.5, alpha = 0.5) +
+    facet_wrap(vars(grid_size), scales = "free_y") +
+    scale_x_continuous(breaks = poisfft_examples[["32"]]$iteration) +
+    labs(title = "PoisFFT 32 Cores") +
+    theme_minimal()
+
+ggplot(poisfft_examples[["64"]], aes (
+    x = iteration,
+    y = total_time_ms)) +
+    geom_point(size = 1.5, alpha = 0.5) +
+    facet_wrap(vars(grid_size), scales = "free_y") +
+    scale_x_continuous(breaks = poisfft_examples[["32"]]$iteration) +
+    labs(title = "PoisFFT 64 Cores") +
+    theme_minimal()
+
+ggplot(poisson_solver_nogpu_example, aes (
+    x = iteration,
+    y = total_time_ms)) +
+    geom_point(size = 1.5, alpha = 0.5) +
+    facet_wrap(vars(grid_size), scales = "free_y") +
+    scale_x_continuous(breaks = poisson_solver_nogpu_example$iteration) +
+    labs(title = "poisson-solver CPU API") +
+    theme_minimal()
+
+ggplot(poisson_solver_gpu_example, aes (
+    x = iteration,
+    y = total_time_ms)) +
+    geom_point(size = 1.5, alpha = 0.5) +
+    facet_wrap(vars(grid_size), scales = "free_y") +
+    scale_x_continuous(breaks = poisson_solver_gpu_example$iteration) +
+    labs(title = "poisson-solver GPU API") +
+    theme_minimal()
+```
+We can notice that the first iteration is consistently slower while the remaining iterations are reasonably close to each other in terms of execution time.
+The warm-up is therefore one iteration.
+
+## Finding Best `PoisFFT` Setup
+For every `PoisFFT` configuration, we will select the number of cores that has the highest throughput average over all grid sizes.
+
+```{r, message=FALSE}
+best_poisfft <- with_highest_throughput(poisfft_example)
+```
+
+32 cores had the highest avg throughput.
+
+## Comparison to `poisson-solver`
+We will average the times for each grid size and compare `poisson-solver` against `PoisFFT`.
+
+```{r, message=FALSE}
+solvers_merged <- bind_rows(
+    best_poisfft,
+    poisson_solver_nogpu_example,
+    poisson_solver_gpu_example) |>
+    group_by(grid_size, api) |>
+    summarize(avg_time_ms = mean(total_time_ms))
+ggplot(solvers_merged, aes (
+    x = grid_size,
+    y = avg_time_ms,
+    fill = api)
+    ) +
+    geom_bar(stat = "identity", position = "dodge", color = "black") +
+    scale_x_continuous(breaks = solvers_merged$grid_size) +
+    theme_minimal()
+```
+
+
+## Distributed Solvers
+TODO
 
 # References
