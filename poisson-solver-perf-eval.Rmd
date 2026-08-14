@@ -21,13 +21,13 @@ make_pretty_poisfft <- function (poisfft_times, num_cores) {
                BCs = bc_name,
                GridSize = grid_size,
                Iteration = iteration,
-               TotalTime_ms = total_time_ms) |>
+               TotalTime_ms = total_execution_ms) |>
         mutate(Cores = num_cores)
 }
 
 make_pretty_poisson_solver <- function (poisson_solver_times) {
    poisson_solver_times_pretty <- poisson_solver_times |>
-       select(-total_time_ms) |>
+       select(-outside_time_ms) |>
        rename(Dimension = dim,
               Precision = precision,
               Uniformity = solver_type,
@@ -52,7 +52,6 @@ show_warmup_iters <- function(times) {
         )) +
         geom_point(size = 1.5, alpha = 0.3) +
         facet_wrap(vars(GridSize), scales = "free_y") +
-        scale_x_continuous(breaks = times$Iteration) +
         labs(title = paste("Warm-up Iterations for",
                            times$ExampleName,
                            sep = " ")) +
@@ -86,27 +85,61 @@ with_highest_throughput <- function (all_times) {
         select(-BestCores)
 }
 
-add_metrics_to_poisfft <- function (poisfft_times) {
-    poisfft_times |>
-        mutate(
-            copy_times_ms = 0,
-            fft_times_ms = 0,
-            kernel_times_ms = 0
-            )
+# For poisson-solver computes individual avgs and sets total avg to 0
+# For poisfft computes total avg and sets all others to 0
+create_avgs <- function (all_times) {
+    poisson_solver_times <- all_times |> filter(API != "PoisFFT")
+    poisfft_times <- all_times |> filter(API == "PoisFFT")
+    
+    poisson_solver_times <- poisson_solver_times |>
+        group_by(Dimension, Precision, Uniformity, API, BCs, GridSize) |>
+        summarize(
+            AvgBufferCopyTime_ms = mean(BufferCopyTime_ms),
+            AvgReshapeTime_ms = mean(ReshapeTime_ms),
+            AvgFFTTime_ms = mean(FFTTime_ms),
+            AvgKernelTime_ms = mean(KernelTime_ms),
+            AvgTotalTime_ms = 0
+        )
+    poisfft_times <- poisfft_times |>
+        group_by(Dimension, Precision, Uniformity, API, BCs, GridSize) |>
+        summarize(AvgTotalTime_ms = mean(TotalTime_ms))
+    
+    bind_rows(poisson_solver_times, poisfft_times)
 }
 
-create_avgs <- function (merged_times) {
-    merged_times <- group_by(grid_size, api) |>
-        summarize(
-            avg_total_time_ms = mean(total_time_ms),
-            avg_copy_time_ms = mean(copy_times_ms),
-            avg_fft_time_ms = mean(fft_times_ms),
-            avg_kernel_time_ms = mean(kernel_times_ms)
-            ) |>
-        mutate(
-            avg_other = avg_total_time_ms -
-                (avg_copy_time_ms + avg_fft_time_ms + avg_kernel_time_ms)
-            )
+plot_config <- function(single_config_times) {
+    dim <- unique(single_config_times$Dimension)[1]
+    prec <- unique(single_config_times$Precision)[1]
+    unif <- unique(single_config_times$Uniformity)[1]
+    bcs <- unique(single_config_times$BCs)[1]
+    grid_side_size <- unique(single_config_times$GridSize)[1]
+    title <-  paste(prec, "_prec_", dim, "D_", unif, "_", bcs, "_", grid_side_size, "side", sep = "")
+    title <- title |> str_replace_all(" \\| ", "")
+    
+    single_config_times <- single_config_times |>
+        rename("Buffer Copies" = "AvgBufferCopyTime_ms",
+               "Reshapes" = "AvgReshapeTime_ms",
+               "FFTs" = "AvgFFTTime_ms",
+               "Kernels" = "AvgKernelTime_ms",
+               "Total Time" = "AvgTotalTime_ms") |>
+        pivot_longer(
+        cols = c("Buffer Copies",
+                 "Reshapes",
+                 "FFTs",
+                 "Kernels",
+                 "Total Time"),
+        names_to = "Phase",
+        values_to = "Time_ms")
+    
+    p <- ggplot(single_config_times,
+           aes(x = API, y = Time_ms, fill = Phase)) +
+        geom_bar(stat = "identity", color = "black") +
+        theme_minimal() +
+        labs (title = title,
+              y = "Time [ms]",
+              fill = "Execution Phase")
+    file_name <- paste("plots/", title, ".png", sep = "")
+    ggsave(file_name, plot = p)
 }
 ```
 
@@ -178,6 +211,11 @@ TODO - How to measure in ELMM?
 The benchmark source code and runner scripts for `poisson-solver` can be found in the [`benchmarks` branch](https://gitlab.mff.cuni.cz/d3s/hpc/poisson-solver/-/tree/benchmarks?ref_type=heads) of `poisson-solver`.
 The benchmark source code and runner scripts for `PoisFFT` can be found in [my `PoisFFT` fork](https://github.com/mntjams/PoisFFT).
 
+It is important to note that `PoisFFT` was modified for these benchmarks.
+During the initial analysis, we found that `PoisFFT` wasn't correctly linking and afterwards initializing `fftwf`.
+This resulted in slower execution time for `PoisFFT` in `float` precision configurations.
+The linking fix can be found [here](1cd908e98cb6103b236c2fb2dce02f25fa1e42bb) and the initialization fix [here](4fbdbde76ed7218f48905589b889597b5754c356).
+
 ## Local Solvers
 The source code for `poisson-solver` is in `poisson-solver/tests/benchmarks/benchmark.cpp` and for `PoisFFT` in `PoisFFT/src/benchmark.f90`.
 The runner script for `poisson-solver` is in `poisson-solver/local_benchmark.sh` and for `PoisFFT` in `PoisFFT/local_benchmark.sh` (both have their `chimera` SLURM launchers in `run_local_benchmark.sh`).
@@ -221,12 +259,12 @@ TODO - Add better description of individual nodes, as well as compiler versions 
 results_path <- "results"
 poisson_solver_path <- paste(
     results_path,
-    "wrong-container-volta05-poisson-solver",
+    "volta05-poisson-solver",
     sep = "/"
     )
 poisfft_path <- paste(
     results_path,
-    "wrong-container-volta05-poisfft",
+    "volta05-poisfft",
     sep = "/"
     )
 poisfft_cores_16_path <- paste(
@@ -239,15 +277,15 @@ poisfft_cores_32_path <- paste(
     "cores_32",
     sep = "/"
 )
-poisfft_cores_64_path <- paste(
+poisfft_cores_48_path <- paste(
     poisfft_path,
-    "cores_64",
+    "cores_48",
     sep = "/"
 )
 poisfft_core_paths <- list(
     "16" = poisfft_cores_16_path,
     "32" = poisfft_cores_32_path,
-    "64" = poisfft_cores_64_path
+    "48" = poisfft_cores_48_path
 )
 ```
 
@@ -272,8 +310,8 @@ all_poisfft_32_core_csv_files <- list.files(
     patter = "*.csv",
     full.names = TRUE
 )
-all_poisfft_64_core_csv_files <- list.files(
-    path = poisfft_core_paths[["64"]],
+all_poisfft_48_core_csv_files <- list.files(
+    path = poisfft_core_paths[["48"]],
     patter = "*.csv",
     full.names = TRUE
 )
@@ -281,12 +319,12 @@ all_poisfft_16_core_times <- read_csv(all_poisfft_16_core_csv_files) |>
     make_pretty_poisfft("16")
 all_poisfft_32_core_times <- read_csv(all_poisfft_32_core_csv_files) |>
     make_pretty_poisfft("32")
-all_poisfft_64_core_times <- read_csv(all_poisfft_64_core_csv_files) |>
-    make_pretty_poisfft("64")
+all_poisfft_48_core_times <- read_csv(all_poisfft_48_core_csv_files) |>
+    make_pretty_poisfft("48")
 all_poisfft_times <- bind_rows(
     all_poisfft_16_core_times,
     all_poisfft_32_core_times,
-    all_poisfft_64_core_times)
+    all_poisfft_48_core_times)
 
 all_times <- bind_rows(all_poisson_solver_times, all_poisfft_times)
 ```
@@ -299,7 +337,10 @@ The number of warm-up iterations shouldn't not differ between different solver c
 
 Afterwards, we will determine if there are any outliers and discord those as well.
 
-```{r, message=FALSE}
+We expect there to be a one or two iterations long warm-up for `poisson-solver`.
+There may be more for both `PoisFFT` and `poisson-solver` if FFT libraries perform autotuning.
+
+```{r, echo=FALSE}
 poisson_solver_1d_example <- all_times |>
     filter(API == "poisson-solver CPU",
            Dimension == "1",
@@ -333,35 +374,35 @@ poisson_solver_nonuniform_z_example <- all_times |>
 
 poisfft_1d_example <- all_times |>
     filter(API == "PoisFFT",
-           Cores == "64",
+           Cores == "48",
            Dimension == "1",
            BCs == "P | P",
            Precision == "double") |>
     mutate(ExampleName = "PoisFFT 1D, Double Prec, Full Periodic")
 poisfft_2d_float_example <- all_times |>
     filter(API == "PoisFFT",
-           Cores == "64",
+           Cores == "48",
            Dimension == "2",
            BCs == "N | N | N | N",
            Precision == "float") |>
     mutate(ExampleName = "PoisFFT 2D, Float Prec, Full Neumann")
 poisfft_3d_full_dirichlet_example <- all_times |>
     filter(API == "PoisFFT",
-           Cores == "64",
+           Cores == "48",
            Dimension == "3",
            BCs == "D | D | D | D | D | D",
            Precision == "double") |>
     mutate(ExampleName = "PoisFFT 3D, Double Prec, Full Dirichlet")
 poisfft_3d_PNsP_example <- all_times |>
     filter(API == "PoisFFT",
-           Cores == "64",
+           Cores == "48",
            Dimension == "3",
            BCs == "P | P | Ns | Ns | P | P",
            Precision == "double") |>
     mutate(ExampleName = "PoisFFT 3D, Double Prec, PNsP")
 poisfft_nonuniform_z_example <- all_times |>
     filter(API == "PoisFFT",
-           Cores == "64",
+           Cores == "48",
            BCs == "P | P | P | P | Ns | Ns",
            Uniformity == "nonuniform_z",
            Precision == "double") |>
@@ -385,7 +426,7 @@ TODO - Determine the correct amount of warm-up iterations.
 Lets say we slice of 2 warm-up iterations.
 We discard those along with times greater than $3 \sigma$.
 
-```{r}
+```{r, include=FALSE}
 all_times <- all_times |>
     filter(Iteration > 1) |>
     group_by(Dimension, Precision, Uniformity, API, BCs, GridSize) |>
@@ -398,30 +439,86 @@ all_times <- all_times |>
 ## Finding Best `PoisFFT` Setup
 For every `PoisFFT` configuration, we will select the number of cores that has the highest throughput average over all grid sizes.
 
-```{r, message=FALSE}
-best_poisfft <- all_times |> with_highest_throughput()
+```{r, include=FALSE}
+times_with_best_poisfft <- all_times |>
+    with_highest_throughput() |>
+    create_avgs()
 ```
 
 ## Comparison to `poisson-solver`
 We will average the times for each grid size and compare `poisson-solver` against `PoisFFT`.
+The results are saved into the `plots` directory.
 
-```{r, message=FALSE}
-solvers_merged <- bind_rows(
-    best_poisfft,
-    poisson_solver_nogpu_example,
-    poisson_solver_gpu_example) |>
-    group_by(grid_size, api) |>
-    summarize(avg_time_ms = mean(total_time_ms))
-ggplot(solvers_merged, aes (
-    x = grid_size,
-    y = avg_time_ms,
-    fill = api)
-    ) +
-    geom_bar(stat = "identity", position = "dodge", color = "black") +
-    scale_x_continuous(breaks = solvers_merged$grid_size) +
-    theme_minimal()
+```{r, include=FALSE}
+x <- times_with_best_poisfft |>
+    group_by(Dimension, Precision, Uniformity, GridSize, BCs) |>
+    group_split() |>
+    map(plot_config)
 ```
 
+
+For nearly all 1D grids, `PoisFFT` outperforms `poisson-solver`.
+For grids of this size, GPUs rarely provide any benefit over CPUs and this outcome is expected.
+
+For 2D grids, the trend is that on grid side sizes of 64 or 128 `PoisFFT` sometimes outperforms `poisson-solver` (even the GPU API) but in majority of cases `poisson-solver` is faster.
+We can also observe that our prediction of buffer copy times between host and device being the biggest bottleneck of `poisson-solver` are confirmed when the grid size grows above a certain limit.
+
+For 3D grids, `poisson-solver` outperforms `PoisFFT` at all times when GPU API is used (in some cases significantly).
+For most boundary condition configurations, `poisson-solver` performs better than `PoisFFT`.
+However, `PoisFFT` achieves better performance than the CPU API of `poisson-solver` even for large grids for some boundary condition configurations.
+This is again due to the buffer copying bottleneck.
+
+The table in `tables/local_speedup_table.html` lists speedups for the plotted configurations.
+```{r, include=FALSE}
+library(knitr)
+library(kableExtra)
+
+speedup_table <- times_with_best_poisfft |>
+    # poisson-solvers total time is the sum of its phases
+    mutate(
+        AvgTotalTime_ms = ifelse(API == "PoisFFT",
+            AvgTotalTime_ms,
+            AvgBufferCopyTime_ms + AvgReshapeTime_ms + AvgFFTTime_ms + AvgKernelTime_ms
+            )
+    ) |>
+    select(Dimension, BCs, Uniformity, Precision, GridSize, API, AvgTotalTime_ms) |>
+    # Each config has time for different APIs
+    pivot_wider(names_from = API, values_from = AvgTotalTime_ms) |>
+    # Compute speedups
+    mutate(
+        Speedup_CPU = PoisFFT / `poisson-solver CPU`,
+        Speedup_GPU = PoisFFT / `poisson-solver GPU`
+    ) |>
+    select(-"poisson-solver CPU", -"poisson-solver GPU", -"PoisFFT") |>
+    arrange(Dimension, BCs, Uniformity, Precision, GridSize)
+
+table <- kable(
+    speedup_table,
+    format = "html",
+    digits = 3,
+    col.names = c(
+        "Dim", "BCs", "Uniformity", "Precision", "Grid Size", "poisson-solver CPU API Speedup",
+        "poisson-solver GPU API Speedup"
+        ),
+    caption = "Speedup of poisson-solver compared to PoisFFT") |>
+    kable_styling(
+        bootstrap_options = c("striped", "hover", "responsive"),
+        full_width = FALSE,
+    )
+save_kable(table, file = "tables/local_speedup_table.html")
+```
+
+The speedups on 3D grids of `poisson-solver` CPU API compared to `PoisFFT` are up to `26x`.
+For GPU API the speedups reach `170x`.
+
+## Conclusion for local solvers
+While in many configurations `poisson-solver` (CPU API) provides significant speedup over `PoisFFT`, there still remain cases where the performance is identical or even worse.
+With manual examination, we confirmed that the buffer copy times between host and device are the main bottleneck.
+
+This bottleneck can be solved by converting more parts of the whole system to execute on the GPU and thus prevent the copies (or at least limit them to device-to-device copies which are shown to be much faster for `poisson-solver`).
+
+Converting legacy Fortran code bases manually is not optimal as code maintainability and readability can be rather poor and these manual conversion thus become very time-consuming.
+The preferred solution would be to design a system for transforming selected parts of a Fortran code base automatically into CUDA, a [solution](https://github.com/Erunno/fortran-abomination) which is currently being worked on.
 
 ## Distributed Solvers
 TODO
