@@ -153,14 +153,16 @@ It is parallelized using `OpenMP` in a single-node (local) configuration and usi
 Furthermore, it offers a hybrid `MPI`/`OpenMP` parallelization in distributed configurations.
 `PoisFFT` requires the users to first define a domain (number of grid cells, grid lengths, boundary conditions, etc.) and then allows them to repeatedly solve the Poisson equation with this domain configuration by supplying the right-hand side of the equation $\Delta \phi = b$.
 
-The solving of the equation is a simple pipeline that can be summarized as follows:
+Equation solving can be summarized as the following pipeline:
 
 1.  Apply a forward FFT on the whole RHS,
-2.  divide each point in the RHS by a sum of pre-computed eigenvalues,
+2.  divide each RHS element by a sum of pre-computed eigenvalues,
 3.  apply a backward FFT on the whole RHS and
-4.  normalize the result to get the $\Phi$.
+4.  normalize the result to get $\Phi$.
 
-While for different combinations of BCs (boundary conditions) the pipeline may slightly vary (e.g., the real RHS is first converted into a complex RHS or different types of FFT are applied separately to 1D pencils in one direction and then to 2D slabs in the other directions) and for distributed solvers it is more complicated, due to the requirements of data locality for FFT libraries, the core steps are still present.
+For different combinations of BCs (boundary conditions) the pipeline may slightly vary (e.g., the real RHS is first converted into a complex RHS or different types of FFTs are applied separately to 1D pencils in one direction and then to 2D slabs in the other directions)
+For distributed solvers it is more complicated due to the requirements of data locality for FFT libraries.
+However, the core steps are still present.
 Apart from the FFT steps, `PoisFFT` is a 1-point stencil computation which makes it a great candidate for a rewrite into C++ and CUDA to take advantage of the GPUs available on the MFF cluster `chimera`.
 
 `poisson-solver` is exactly this rewrite which we've done as a part of Research Project (NPRG070).
@@ -178,6 +180,8 @@ For non-distributed solvers, we want to determine the speedup of `poisson-solver
 
 In addition to those, `PoisFFT` will also be measured using different combination of cores (16, 32 and 48).
 
+The grid side sizes will range from 64 to 512 with the step of 64.
+
 We suspect that the buffer copying between host and device will be the bottleneck in `poisson-solver`.
 Therefore, `poisson-solver` provides additional API that accepts device buffers and copies buffers only between devices.
 We also want to do the previous measurements using this API to simulate the situation where other parts of `ELMM` are rewritten and the inputs for `poisson-solver` are already on the device.
@@ -194,12 +198,10 @@ We cannot measure the individual metrics as `PoisFFT` has no buffer copying and 
 
 ## Distributed Solvers Evaluation
 
-TODO - Not finished, only rough ideas
-
-- Measure only 3D solvers, distributed solvers won't realistically be run on <3D problems.
-- Measure strong scaling with increasing amount of nodes.
-    - Node selection? I don't think we have many BW nodes.
-- Measure weak scaling with increasing amount of nodes.
+For distributed solvers, we will measure the same metrics as for local solvers.
+We will measure a subset of the configurations.
+That is strong scaling on 3D grids of side size 512 and weak scaling on 3D grids with local side size 256.
+Distributed solvers won't realistically be run on smaller problems and therefore doesn't make sense to measure them in those scenarios.
 
 ## ELMM Evaluation
 TODO - How to measure in ELMM?
@@ -243,28 +245,26 @@ TODO
 
 # Platform
 
-TODO - This is currently not true, we performed them on volta05 - but the final measurement will be on bw01
+The local solver benchmarks were compiled and executed on the `bw01` node on `chimera` cluster.
+`bw01` has: 2x NVIDIA RTX PRO Blackwell Server Edition, PCIe 96 GB (only one is used for local benchmarks).
+The CPU on `bw01` is an AMD EPYC 9454 48-Core Processor supporting avx, avx2, avx512 vector ISA.
+The CUDA version on `bw01` is 13.3.
 
-The local solver benchmarks were executed on the `bw01` node on `chimera` cluster.
+TODO - Describe environment on voltas
 
-TODO - Delete if I really did it this way, modify below otherwise
-
-The distributed solver benchmarks were executed on nodes `bw01`, `volta02`, `volta03` and `volta05`.
-
-TODO - Add better description of individual nodes, as well as compiler versions and CUDA versions.
+The distributed solver benchmarks were executed on nodes `volta02`, `volta03` and `volta05`.
 
 # Analysis
 ```{r, include=FALSE}
-# TODO - Replace with bw01 measurements paths
 results_path <- "results"
 poisson_solver_path <- paste(
     results_path,
-    "volta05-poisson-solver",
+    "bw01-poisson-solver",
     sep = "/"
     )
 poisfft_path <- paste(
     results_path,
-    "volta05-poisfft",
+    "bw01-poisfft",
     sep = "/"
     )
 poisfft_cores_16_path <- paste(
@@ -421,9 +421,7 @@ show_warmup_iters(poisfft_3d_PNsP_example)
 show_warmup_iters(poisfft_nonuniform_z_example)
 ```
 
-TODO - Determine the correct amount of warm-up iterations.
-
-Lets say we slice of 2 warm-up iterations.
+From the plots above it appears that the measurements have at most 1 to 2 warm-up iterations.
 We discard those along with times greater than $3 \sigma$.
 
 ```{r, include=FALSE}
@@ -457,16 +455,18 @@ x <- times_with_best_poisfft |>
 ```
 
 
-For nearly all 1D grids, `PoisFFT` outperforms `poisson-solver`.
+For all 1D grids, `PoisFFT` outperforms `poisson-solver`.
 For grids of this size, GPUs rarely provide any benefit over CPUs and this outcome is expected.
 
-For 2D grids, the trend is that on grid side sizes of 64 or 128 `PoisFFT` sometimes outperforms `poisson-solver` (even the GPU API) but in majority of cases `poisson-solver` is faster.
-We can also observe that our prediction of buffer copy times between host and device being the biggest bottleneck of `poisson-solver` are confirmed when the grid size grows above a certain limit.
+For 2D grids, the trend is that on grid side sizes of 64 `PoisFFT` outperforms `poisson-solver` (even the GPU API) but on larger grids, `poisson-solver` is faster.
+Here, we can also start to observe the bottleneck of our computation - buffer copy times and sometimes even FFTs.
 
-For 3D grids, `poisson-solver` outperforms `PoisFFT` at all times when GPU API is used (in some cases significantly).
+For 3D grids, `poisson-solver` outperforms `PoisFFT` at all times when GPU API is used.
 For most boundary condition configurations, `poisson-solver` performs better than `PoisFFT`.
 However, `PoisFFT` achieves better performance than the CPU API of `poisson-solver` even for large grids for some boundary condition configurations.
-This is again due to the buffer copying bottleneck.
+Examining the execution times of those configurations, we can notice that host-device buffer copying is a significant part of the bottleneck.
+
+We can also observe that sometimes, FFT computation takes longer than buffer copying (e.g. for 3D full dirichlet configuration).
 
 The table in `tables/local_speedup_table.html` lists speedups for the plotted configurations.
 ```{r, include=FALSE}
@@ -502,22 +502,28 @@ table <- kable(
         ),
     caption = "Speedup of poisson-solver compared to PoisFFT") |>
     kable_styling(
-        bootstrap_options = c("striped", "hover", "responsive"),
+        bootstrap_options = c("striped", "hover"),
         full_width = FALSE,
     )
 save_kable(table, file = "tables/local_speedup_table.html")
 ```
 
-The speedups on 3D grids of `poisson-solver` CPU API compared to `PoisFFT` are up to `26x`.
-For GPU API the speedups reach `170x`.
+The speedups on 3D grids of `poisson-solver` CPU API compared to `PoisFFT` are up to `~20x`.
+For GPU API the speedups reach `~109x`.
+
+For 2D grids the speedups are more impressive, reaching up to `~236x` for the CPU API and `~596x` for the GPU API.
 
 ## Conclusion for local solvers
+
 While in many configurations `poisson-solver` (CPU API) provides significant speedup over `PoisFFT`, there still remain cases where the performance is identical or even worse.
-With manual examination, we confirmed that the buffer copy times between host and device are the main bottleneck.
+With manual examination, we confirmed that the buffer copy times between host and device are the main bottleneck, although FFT times are not to be ignored for certain configurations.
 
-This bottleneck can be solved by converting more parts of the whole system to execute on the GPU and thus prevent the copies (or at least limit them to device-to-device copies which are shown to be much faster for `poisson-solver`).
+There is currently no other GPU FFT library that satisfies `poisson-solver` requirements.
+It may be worthwhile contributing to VkFFT to ensure maximum performance due to it currently being the only library to provide the same functionality as `FFTW` does on CPUs.
 
-Converting legacy Fortran code bases manually is not optimal as code maintainability and readability can be rather poor and these manual conversion thus become very time-consuming.
+The copy bottleneck can be solved by converting more parts of the whole system to execute on the GPU and thus prevent the copies (or at least limit them to device-to-device copies which are shown to be much faster for `poisson-solver`).
+
+Converting legacy Fortran code bases manually is not optimal as their code readability can be rather poor (with little to no documentation) and manual conversions thus become very time-consuming.
 The preferred solution would be to design a system for transforming selected parts of a Fortran code base automatically into CUDA, a [solution](https://github.com/Erunno/fortran-abomination) which is currently being worked on.
 
 ## Distributed Solvers
