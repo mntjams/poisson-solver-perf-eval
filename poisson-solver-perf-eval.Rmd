@@ -28,6 +28,13 @@ make_pretty_poisfft <- function (poisfft_times, num_cores) {
         mutate(Cores = num_cores)
 }
 
+make_pretty_poisfft_distr <- function(poisfft_times) {
+    poisfft_times |>
+        make_pretty_poisfft(1) |>
+        select(-Cores) |>
+        rename(NumProcs = num_procs)
+}
+
 make_pretty_poisson_solver <- function (poisson_solver_times) {
    poisson_solver_times_pretty <- poisson_solver_times |>
        select(-outside_time_ms) |>
@@ -48,6 +55,12 @@ make_pretty_poisson_solver <- function (poisson_solver_times) {
        mutate (API = paste("poisson-solver", API, sep = " "))
 }
 
+make_pretty_poisson_solver_distr <- function(poisson_solver_times) {
+    poisson_solver_times |>
+        make_pretty_poisson_solver() |>
+        rename(NumProcs = num_procs)
+}
+
 show_warmup_iters <- function(times) {
     ggplot(times, aes (
         x = Iteration,
@@ -55,7 +68,20 @@ show_warmup_iters <- function(times) {
         )) +
         geom_point(size = 1.5, alpha = 0.3) +
         facet_wrap(vars(GridSize), scales = "free_y") +
-        labs(title = paste("Warm-up Iterations for",
+        labs(title = paste("Warm-up for",
+                           times$ExampleName,
+                           sep = " ")) +
+        theme_minimal()
+}
+
+show_warmup_iters_distr <- function(times) {
+    ggplot(times, aes (
+        x = Iteration,
+        y = TotalTime_ms,
+        )) +
+        geom_point(size = 1.5, alpha = 0.3) +
+        facet_wrap(vars(NumProcs), scales = "free_y") +
+        labs(title = paste("Warm-up for",
                            times$ExampleName,
                            sep = " ")) +
         theme_minimal()
@@ -110,7 +136,30 @@ create_avgs <- function (all_times) {
     bind_rows(poisson_solver_times, poisfft_times)
 }
 
-plot_config <- function(single_config_times) {
+# Same as above but groups by Node Utilization instead of GridSizes
+# (GridSizes are identical in strong scaling measurements)
+# We also don't set avg total time to 0 for poisson-solver
+create_avgs_distr <- function(all_times) {
+    poisson_solver_times <- all_times |> filter(API != "PoisFFT")
+    poisfft_times <- all_times |> filter(API == "PoisFFT")
+    
+    poisson_solver_times <- poisson_solver_times |>
+        group_by(Dimension, Precision, Uniformity, API, BCs, `Node Utilization`) |>
+        summarize(
+            AvgBufferCopyTime_ms = mean(BufferCopyTime_ms),
+            AvgReshapeTime_ms = mean(ReshapeTime_ms),
+            AvgFFTTime_ms = mean(FFTTime_ms),
+            AvgKernelTime_ms = mean(KernelTime_ms),
+            AvgTotalTime_ms = mean(TotalTime_ms)
+        )
+    poisfft_times <- poisfft_times |>
+        group_by(Dimension, Precision, Uniformity, API, BCs, `Node Utilization`) |>
+        summarize(AvgTotalTime_ms = mean(TotalTime_ms))
+    
+    bind_rows(poisson_solver_times, poisfft_times)
+}
+
+plot_bars <- function(single_config_times) {
     dim <- unique(single_config_times$Dimension)[1]
     prec <- unique(single_config_times$Precision)[1]
     unif <- unique(single_config_times$Uniformity)[1]
@@ -141,10 +190,114 @@ plot_config <- function(single_config_times) {
         labs (title = title,
               y = "Time [ms]",
               fill = "Execution Phase")
-    file_name <- paste("plots/", title, ".png", sep = "")
+    file_name <- paste("plots/local/", title, ".png", sep = "")
+    ggsave(file_name, plot = p)
+}
+
+plot_scaling <- function(single_config_times, scaling_strength) {
+    prec <- unique(single_config_times$Precision)[1]
+    unif <- unique(single_config_times$Uniformity)[1]
+    bcs <- unique(single_config_times$BCs)[1]
+    title <-  paste(prec, "_prec_", unif, "_", bcs, sep = "")
+    title <- title |> str_replace_all(" \\| ", "")
+    
+    single_config_times <- single_config_times |>
+        rename("Buffer Copies" = "AvgBufferCopyTime_ms",
+               "Reshapes" = "AvgReshapeTime_ms",
+               "FFTs" = "AvgFFTTime_ms",
+               "Kernels" = "AvgKernelTime_ms",
+               "Total Time" = "AvgTotalTime_ms")
+        
+    p <- ggplot(single_config_times,
+           aes(x = `Node Utilization`, y = `Total Time`, color = `API`)) +
+        geom_point() +
+        geom_line() +
+        theme_minimal() +
+        labs (title = title,
+              y = "Time [ms]")
+    file_name <- paste("plots/distributed/", scaling_strength, "/", title, ".png", sep = "")
+    ggsave(file_name, plot = p)
+}
+
+num_procs_to_node_utilization <- function(all_times) {
+    poisfft_times <- all_times |> filter(API == "PoisFFT")
+    poisson_solver_times <- all_times |> filter(API != "PoisFFT")
+    
+    poisfft_times <- poisfft_times |>
+        mutate(`Node Utilization` = case_when(
+            `NumProcs` == 8 ~ 0.25,
+            `NumProcs` == 16 ~ 0.5,
+            `NumProcs` == 32 ~ 1,
+            `NumProcs` == 48 ~ 2,
+            `NumProcs` == 64 ~ 3,
+        ))
+    poisson_solver_times <- poisson_solver_times |>
+        mutate(`Node Utilization` = case_when(
+            `NumProcs` == 1 ~ 0.25,
+            `NumProcs` == 2 ~ 0.5,
+            `NumProcs` == 4 ~ 1,
+            `NumProcs` == 6 ~ 2,
+            `NumProcs` == 8 ~ 3,
+        ))
+    
+    bind_rows(poisfft_times, poisson_solver_times)
+}
+
+plot_bars_distr <- function(single_config_times) {
+    prec <- unique(single_config_times$Precision)[1]
+    unif <- unique(single_config_times$Uniformity)[1]
+    bcs <- unique(single_config_times$BCs)[1]
+    title <-  paste(prec, "_prec_", unif, "_", bcs, "_", "nodes_utilized_3", sep = "")
+    title <- title |> str_replace_all(" \\| ", "")
+    
+    single_config_times <- single_config_times |>
+        rename("Buffer Copies" = "AvgBufferCopyTime_ms",
+               "Reshapes" = "AvgReshapeTime_ms",
+               "FFTs" = "AvgFFTTime_ms",
+               "Kernels" = "AvgKernelTime_ms",
+               "Total Time" = "AvgTotalTime_ms") |>
+        pivot_longer(
+        cols = c("Buffer Copies",
+                 "Reshapes",
+                 "FFTs",
+                 "Kernels",
+                 "Total Time"),
+        names_to = "Phase",
+        values_to = "Time_ms")
+    
+    p <- ggplot(single_config_times,
+           aes(x = API, y = Time_ms, fill = Phase)) +
+        geom_bar(stat = "identity", color = "black") +
+        theme_minimal() +
+        labs (title = title,
+              y = "Time [ms]",
+              fill = "Execution Phase")
+    file_name <- paste("plots/distributed/bars/", title, ".png", sep = "")
     ggsave(file_name, plot = p)
 }
 ```
+
+# Warning about Data Correctness
+
+Right before the cluster maintenance, on the evening of 4.9.2026, we found out that our `PoisFFT` benchmarks have been incorrectly constructed and some configurations (confirmed that not all) were measured to be slower than they in general are.
+We believe this slowdown could be due to cache conflict misses but haven't confirmed it.
+The measured data is correct and `PoisFFT` really behaves this way but it is a special case and won't be observed in most use-cases.
+
+This fact will most likely alter the speedups of `poisson-solver` vs `PoisFFT` (expect smaller speedups) but the analysis and methodology should remain the same.
+
+More details are in the [ELMM Local Solvers section](#elmm-local-solvers).
+
+Another important fact is that the `TridiagZ` (computation kernels for `poisson-solver nonuniform-z` solvers) was accidentally not wrapped in a timer (see benchmark description for more information about timers), thus resulting in a faster kernel time in `nonuniform-z poisson-solver` configurations.
+This was also fixed and will be remeasured upon the cluster reopening.
+
+# AI Usage
+LLMs were used for the following tasks:
+
+1. Fortran syntax explanation and navigation of the `ELMM` model,
+2. help with rewriting `poisson-solver` (cpp) benchmarks into their `PoisFFT` (Fortran) equivalent,
+3. assistance with plotting the data and
+4. alternative to a search engine (e.g. "Find sources where I could read about X"),
+5. give constructive criticism about this report.
 
 # Problem Description
 ## Motivation behind `poisson-solver`
@@ -152,8 +305,8 @@ plot_config <- function(single_config_times) {
 It is a part of [`ELMM`](https://bitbucket.org/LadaF/elmm/src/master/) (Extended Large Eddy Microscale Model), a LES (Large Eddy Simulation) model for atmospheric flows.
 
 `PoisFFT` is written entirely in Fortran and utilizes only CPUs.
-It is parallelized using `OpenMP` in a single-node (local) configuration and using `MPI` in distributed configuration.
-Furthermore, it offers a hybrid `MPI` + `OpenMP` parallelization in distributed configurations.
+It is parallelized using `OpenMP` in a single-node (local) setup and using `MPI` in a distributed setup.
+Furthermore, it offers a hybrid `MPI` + `OpenMP` parallelization in a distributed setup.
 `PoisFFT` requires the users to first define a domain (number of grid cells, grid lengths, boundary conditions, etc.) and then allows them to repeatedly solve the Poisson equation with this domain configuration by supplying the right-hand side of the equation $\Delta \phi = b$.
 
 Equation solving can be summarized as the following pipeline:
@@ -164,15 +317,16 @@ Equation solving can be summarized as the following pipeline:
 4.  normalize the result to get $\Phi$.
 
 For different combinations of BCs (boundary conditions) the pipeline may slightly vary (e.g., the real RHS is first converted into a complex RHS or different types of FFTs are applied separately to 1D pencils in one direction and then to 2D slabs in the other directions).
-For distributed solvers it is more complicated due to the requirements of data locality for FFT libraries.
+For distributed solvers it is even more complicated due to the requirement of data locality before FFT steps.
+
 Apart from the FFT steps, `PoisFFT` is a 1-point stencil computation which makes it a great candidate for a rewrite into C++ and CUDA to take advantage of the GPUs available on the MFF cluster `chimera`.
 
 `poisson-solver` is exactly this rewrite which we've done as a part of Research Project (NPRG070).
 As stated before, it utilizes GPUs which are more suited for this type of a problem.
 
 We suspect that the buffer copying between host and device will be the bottleneck in `poisson-solver`.
-Therefore, `poisson-solver` provides additional API that accepts device buffers and copies buffers only between devices.
-We refer to the APIs as GPU API (device-device copies only) and CPU API (host-device copies).
+Therefore, `poisson-solver` provides additional API that accepts device buffers.
+We refer to the APIs as GPU API (no host-device copies) and CPU API (host-device copies).
 
 ## Local Solvers Evaluation
 For non-distributed solvers, we want to determine the speedup of `poisson-solver` compared to `PoisFFT` in all possible combinations of:
@@ -180,7 +334,7 @@ For non-distributed solvers, we want to determine the speedup of `poisson-solver
 1. Precision (double or float),
 2. dimensionality of the grid (1, 2 or 3),
 3. uniformity of the grid on the Z axis and
-    - Both solvers support the option to have the grid cell sizes nonuniform in the Z axis, this requires a different solving method.
+    - Both solvers support the option to have the grid cell sizes nonuniform in the Z axis.
 4. boundary conditions (dependent on the dimensionality and uniformity of Z axis).
 
 In addition to those, `PoisFFT` will also be measured with different number of cores (16, 32 and 48).
@@ -197,7 +351,8 @@ To help us determine the bottleneck of the pipeline for further research focus, 
 4. total time spent solving the equation.
 
 Only the total time spent solving the equation will be measured for `PoisFFT`.
-We cannot measure the individual metrics as `PoisFFT` has no buffer copying and the FFTs are sometimes interleaved with kernel execution inside `OpenMP` parallel blocks.
+Some metrics are not present (buffer copying) and some would be tedious to incorporate into the code-base as individual pipeline steps are not as cleanly separated as in `poisson-solver`.
+If we determine `PoisFFT` requires more through inspection, we will incorporate the measurement of individual steps into `PoisFFT` as well.
 
 ## Distributed Solvers Evaluation
 We won't evaluate the `MPI` + `OpenMP` hybrid version of `PoisFFT` due to its instability.
@@ -209,14 +364,15 @@ We will measure a subset of the configurations.
 That is: strong scaling on 3D grids of side size 512 and weak scaling on 3D grids with local side size 256.
 Distributed solvers won't realistically be run on smaller problems and therefore doesn't make sense to measure them in those scenarios.
 We will also remove BC configurations that `PoisFFT` doesn't implement for a distributed environment, namely: NsPP and PNsP, as well as BC configurations which crashed `PoisFFT` during our benchmarks, namely: NsDsNsNsNsNs and NDNNNN.
+Furthermore, we noticed that some configurations won't compute the correct result with Z axis being distributed in `PoisFFT` (but will compute the correct result for `poisson-solver` in the same environment), this includes DsDsDsDsNsDs, DsDsDsDsNsNs, DsDsDsDsPP and DDDDND.
+Those will be measured but with number of processes in the Z axis set to 1 for both `poisson-solver` and `PoisFFT`.
 
 We also decrease the number of iterations per one configuration to 30 to reduce the overall measurement time (one iteration can take multiple seconds).
 
 ## ELMM Evaluation
-TODO - How to measure in ELMM?
-
-- ELMM already outputs the total time to execute a simulation and time spent in Poisson solver
-    - It's very bare-bones but maybe it can be used?
+At last, we will evaluate the overall speedup of `ELMM` with the new solver.
+We will us the outputs of `ELMM`.
+It measures the overall execution time as well as time spent in the Poisson solver.
 
 # Benchmark Descriptions
 The benchmark source code and runner scripts for `poisson-solver` can be found in the [`benchmarks` branch](https://gitlab.mff.cuni.cz/d3s/hpc/poisson-solver/-/tree/benchmarks?ref_type=heads) of `poisson-solver`.
@@ -250,6 +406,10 @@ The `HybridScopedTimer` is utilized for measurements where we can't guarantee on
 The total time is measured using `SYSTEM_CLOCK`.
 
 ## Distributed Solvers
+The source code for `poisson-solver` is in `poisson-solver/tests/benchmarks/benchmarks_mpi.cpp` and for `PoisFFT` in `PoisFFT/src/benchmarks_mpi.f90`.
+The runner scripts are `strong_scaling_benchmarks.sh` and `weak_scaling_benchmarks.sh` in their respective directories.
+The SLURM launchers are `run_strong_scaling_benchmarks.sh` and `run_weak_scaling_benchmarks.sh` in their respective directories.
+
 The runners and SLURM launchers for distributed benchmarks are very similar to the local ones.
 The only significant difference is that in a distributed environment the iteration time is measured for every process.
 After each iteration we select the maximum total time among all processes and report that.
@@ -258,28 +418,25 @@ In the case of `poisson-solver` the reported times of individual steps are acqui
 The rationale behind being that after the solver is ran, there will most likely be some synchronization point (e.g. `MPI_Barrier`) before the application continues.
 This approach allows us to measure the time until all processes finish without measuring the overhead of synchronization.
 
-We assign 16 cores per process as some nodes only have 32 cores.
+The DsDsDsDsNsDs, DsDsDsDsNsNs, DsDsDsDsPP and DDDDND configurations were measured manually with Z axis non-distributed (i.e. only Y distributed).
 
 # Platform
-
 The local solver benchmarks were compiled and executed on the `bw01` node on `chimera` cluster.
 `bw01` has: 2x NVIDIA RTX PRO Blackwell Server Edition, PCIe 96 GB (only one is used for local benchmarks).
 The CPU on `bw01` is an AMD EPYC 9454 48-Core Processor with 768 GB RAM and supporting avx, avx2, avx512 vector ISA.
 The CUDA version on `bw01` is 13.3.
 
-The distributed solver benchmarks were compiled on `volta05` and executed on nodes `volta02`, `volta03` and `volta05` in the following combinations:
+The distributed solver benchmarks were compiled on `volta05` and executed on nodes `volta02`, `volta03` and `volta05`.
+For their combination, see the SLURM launcher scripts (`run_...`).
 
-1. Single process on `volta05`,
-2. two processes on `volta05`,
-3. two processes on each node `volta02` and `volta05` (4 procs total),
-4. two processes on each node `volta02`, `volta03` and `volta05` (6 procs total).
+The `chimera` cluster has only one Blackwell node and therefore `volta` nodes were used exclusively to prevent measurements with significant load imbalance among nodes.
 
-The `chimera` cluster has only one Blackwell node and therefore `volta` nodes were used exclusively to prevent measurements with significant load imbalance.
-
-`volta02` and `volta03` have: 2x NVIDIA V100 PCIe 16 GB GPU, Intel Xeon Silver 4110 CPU with 2 sockets of 8 cores each and 192 GB RAM.
-`volta05` has: 4x NVIDIA V100 SXM2 32 GB (at most two are used for distributed benchmarks), Intel Xeon Gold 5218 with 2 sockets of 16 cores each CPU and 384 GB RAM.
+`volta02` and `volta03` both have: 2x NVIDIA V100 PCIe 16 GB GPU, Intel Xeon Silver 4110 CPU with 2 sockets of 8 cores each and 192 GB RAM.
+`volta05` has: 4x NVIDIA V100 SXM2 32 GB, Intel Xeon Gold 5218 CPU with 2 sockets of 16 cores each and 384 GB RAM.
 All `volta[02,03,05]` CPUs support avx, avx2 and avx512.
 The CUDA version on all `volta[02,03,05]` is 12.9.
+
+The `volta` nodes are connected with 10Gb Ethernet (no InfiniBand).
 
 # Analysis
 ```{r, include=FALSE}
@@ -321,7 +478,7 @@ poisfft_core_paths <- list(
 ```{r, include=FALSE}
 all_poisson_solver_csv_files <- list.files(
     path = poisson_solver_path,
-    patter = "*.csv",
+    pattern = "*.csv",
     full.names = TRUE
 )
 all_poisson_solver_times <- read_csv(all_poisson_solver_csv_files) |>
@@ -359,7 +516,7 @@ all_times <- bind_rows(all_poisson_solver_times, all_poisfft_times)
 
 ### Warm-up and Outliers
 First, we will manually determine the number of warm-up iterations for pre-selected configurations and discard that number of iterations from all configurations.
-The number of warm-up iterations shouldn't not differ between different solver configurations.
+The number of warm-up iterations should not differ significantly between different solver configurations.
 
 Afterwards, we will determine if there are any outliers and discord those as well.
 
@@ -447,13 +604,13 @@ show_warmup_iters(poisfft_3d_PNsP_example)
 show_warmup_iters(poisfft_nonuniform_z_example)
 ```
 
-From the plots above it appears that the measurements have at 2 warm-up iterations.
+From the plots above it appears that the measurements have at most 2 warm-up iterations.
 We discard those along with times greater than $3 \sigma$.
 
 ```{r, include=FALSE}
 all_times <- all_times |>
     filter(Iteration > 1) |>
-    group_by(Dimension, Precision, Uniformity, API, BCs, GridSize) |>
+    group_by(Dimension, Precision, Uniformity, API, BCs, GridSize, Cores) |>
     mutate(mean = mean(TotalTime_ms), sd = sd(TotalTime_ms)) |>
     filter(TotalTime_ms <= mean + 3 * sd) |>
     filter(TotalTime_ms >= mean - 3 * sd) |>
@@ -471,13 +628,13 @@ times_with_best_poisfft <- all_times |>
 
 ## Comparison to `poisson-solver`
 We will average the times for each grid size and compare `poisson-solver` against `PoisFFT`.
-The results are saved into the `plots` directory.
+The results are saved into the `plots/local` directory.
 
 ```{r, include=FALSE}
 times_with_best_poisfft |>
     group_by(Dimension, Precision, Uniformity, GridSize, BCs) |>
     group_split() |>
-    map(plot_config)
+    map(plot_bars)
 ```
 
 
@@ -485,14 +642,17 @@ For all 1D grids, `PoisFFT` outperforms `poisson-solver`.
 For grids of this size, GPUs rarely provide any benefit over CPUs and this outcome is expected.
 
 For 2D grids, the trend is that on grid side sizes of 64 `PoisFFT` outperforms `poisson-solver` (even the GPU API) but on larger grids, `poisson-solver` is faster.
-Here, we can also start to observe the bottleneck of our computation - buffer copy times and sometimes even FFTs.
+Here, we can also start to observe the bottleneck of our computation - buffer copy times.
 
 For 3D grids, `poisson-solver` outperforms `PoisFFT` at all times when GPU API is used.
 For most boundary condition configurations, `poisson-solver` performs better than `PoisFFT`.
 However, `PoisFFT` achieves better performance than the CPU API of `poisson-solver` even for large grids for some boundary condition configurations.
-Examining the execution times of those configurations, we can notice that host-device buffer copying is a significant part of the bottleneck.
+This happens when the computation itself is trivial enough that the overhead of copying the data to and from the device are not mitigated by the speedup achieved by the GPU port.
 
 We can also observe that sometimes, FFT computation takes longer than buffer copying (e.g. for 3D full dirichlet configuration).
+
+Another interesting phenomenon is that sometimes it takes less time to compute a larger grid.
+The reason could be that the speed of FFT computation depends on the prime factorization of the grid size and therefore could result in faster algorithm being used on a larger grid leading to faster solve time than on a smaller grid.
 
 The table in `tables/local_speedup_table.html` lists speedups for the plotted configurations.
 ```{r, include=FALSE}
@@ -532,9 +692,9 @@ save_kable(table, file = "tables/local_speedup_table.html")
 ```
 
 The speedups on 3D grids of `poisson-solver` CPU API compared to `PoisFFT` are up to `~20x`.
-For GPU API the speedups reach `~109x`.
+For GPU API the speedups reach `~114x`.
 
-For 2D grids the speedups are more impressive, reaching up to `~236x` for the CPU API and `~596x` for the GPU API.
+For 2D grids the speedups are more impressive, reaching up to `~227x` for the CPU API and `~645x` for the GPU API.
 
 ## Conclusion for Local Solvers
 
@@ -544,34 +704,378 @@ With manual examination, we confirmed that the buffer copy times between host an
 There is currently no other GPU FFT library that satisfies `poisson-solver` requirements.
 It may be worthwhile contributing to VkFFT to ensure maximum performance due to it currently being the only library to provide the same functionality as `FFTW` does on CPUs.
 
-The copy bottleneck can be solved by converting more parts of the whole system to execute on the GPU and thus prevent the copies (or at least limit them to device-to-device copies which are shown to be much faster for `poisson-solver`).
+The copy bottleneck can be solved by converting more parts of the whole system to execute on the GPU and thus prevent the copies.
 
 Converting legacy Fortran code bases manually is not optimal as their code readability can be rather poor (with little to no documentation) and manual conversions thus become very time-consuming.
 The preferred solution would be to design a system for transforming selected parts of a Fortran code base automatically into CUDA, a [solution](https://github.com/Erunno/fortran-abomination) which is currently being worked on.
 
 ## Distributed Solvers
-TODO - Load the data
+```{r, include=FALSE}
+poisson_solver_distr_path <- paste(results_path, "mpi-poisson-solver", sep = "/")
+poisfft_distr_path <- paste(results_path, "mpi-poisfft", sep = "/")
+
+poisson_solver_str_scal_path <- paste(poisson_solver_distr_path, "strong_scaling", sep = "/")
+poisson_solver_weak_scal_path <- paste(poisson_solver_distr_path, "weak_scaling", sep = "/")
+poisfft_str_scal_path <- paste(poisfft_distr_path, "strong_scaling", sep = "/")
+poisfft_weak_scal_path <- paste(poisfft_distr_path, "weak_scaling", sep = "/")
+
+poisson_solver_str_scal_csv <- list.files(poisson_solver_str_scal_path,
+                                          "*.csv",
+                                          full.names = TRUE)
+poisson_solver_weak_scal_csv <- list.files(poisson_solver_weak_scal_path,
+                                          "*.csv",
+                                          full.names = TRUE)
+poisfft_str_scal_csv <- list.files(poisfft_str_scal_path,
+                                          "*.csv",
+                                          full.names = TRUE)
+poisfft_weak_scal_csv <- list.files(poisfft_weak_scal_path,
+                                          "*.csv",
+                                          full.names = TRUE)
+
+poisson_solver_str_scal_times <- read_csv(poisson_solver_str_scal_csv) |>
+    make_pretty_poisson_solver_distr()
+poisson_solver_weak_scal_times <- read_csv(poisson_solver_weak_scal_csv) |>
+    make_pretty_poisson_solver_distr()
+poisfft_str_scal_times <- read_csv(poisfft_str_scal_csv) |>
+    make_pretty_poisfft_distr()
+poisfft_weak_scal_times <- read_csv(poisfft_weak_scal_csv) |>
+    make_pretty_poisfft_distr()
+
+all_str_distr_times <- bind_rows(poisson_solver_str_scal_times,
+                             poisfft_str_scal_times)
+all_weak_distr_times <- bind_rows(poisson_solver_weak_scal_times,
+                             poisfft_weak_scal_times)
+```
 
 ### Warm-up and Outliers
-TODO - Manually determine warm-up times
+We will once again manually determine the number of warm-up iterations for pre-selected configurations, discard that number of iterations from all configurations and afterwards, discard any outliers.
+
+First, the strong scaling measurements.
+
+```{r, echo=FALSE}
+poisson_solver_full_periodic_example <- all_str_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "P | P | P | P | P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, Full Periodic, CPU API")
+poisson_solver_full_neumann_float_example <- all_str_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "N | N | N | N | N | N",
+           Precision == "float") |>
+    mutate(ExampleName = "poisson-solver 3D, Float Prec, Full Neumann, CPU API")
+poisson_solver_full_dirichlet_gpu_example <- all_str_distr_times |>
+    filter(API == "poisson-solver GPU",
+           Dimension == "3",
+           BCs == "D | D | D | D | D | D",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, Full Dirichlet, GPU API")
+poisson_solver_PNsNs_example <- all_str_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "P | P | Ns | Ns | Ns | Ns",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, PNsNs, CPU API")
+poisson_solver_nonuniform_z_example <- all_str_distr_times |>
+    filter(API == "poisson-solver CPU",
+        BCs == "P | P | P | P | Ns | Ns",
+        Uniformity == "nonuniform_z",
+        Precision == "double") |>
+    mutate(ExampleName = "poisson-solver Nonuniform Z, Double Prec, PPNs, CPU API")
+
+poisfft_full_periodic_example <- all_str_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "P | P | P | P | P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, Full Periodic")
+poisfft_full_neumann_float_example <- all_str_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "N | N | N | N | N | N",
+           Precision == "float") |>
+    mutate(ExampleName = "PoisFFT 3D, Float Prec, Full Neumann")
+poisfft_full_dirichlet_example <- all_str_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "D | D | D | D | D | D",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, Full Dirichlet")
+poisfft_PNsNs_example <- all_str_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "P | P | Ns | Ns | Ns | Ns",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, PNsNs")
+poisfft_nonuniform_z_example <- all_str_distr_times |>
+    filter(API == "PoisFFT",
+           BCs == "P | P | P | P | Ns | Ns",
+           Uniformity == "nonuniform_z",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT Nonuniform Z, Double Prec, PPNs")
+
+show_warmup_iters_distr(poisson_solver_full_periodic_example)
+show_warmup_iters_distr(poisson_solver_full_neumann_float_example)
+show_warmup_iters_distr(poisson_solver_full_dirichlet_gpu_example)
+show_warmup_iters_distr(poisson_solver_PNsNs_example)
+show_warmup_iters_distr(poisson_solver_nonuniform_z_example)
+
+show_warmup_iters_distr(poisfft_full_periodic_example)
+show_warmup_iters_distr(poisfft_full_neumann_float_example)
+show_warmup_iters_distr(poisfft_full_dirichlet_example)
+show_warmup_iters_distr(poisfft_PNsNs_example)
+show_warmup_iters_distr(poisfft_nonuniform_z_example)
+```
+
+Here, it appears that the measurements have at most 4 warm-up iterations.
+We discard those along with times greater than $3 \sigma$.
+```{r, include=FALSE}
+all_str_distr_times <- all_str_distr_times |>
+    filter(Iteration > 3) |>
+    num_procs_to_node_utilization() |>
+    group_by(Dimension, Precision, Uniformity, API, BCs, NumProcs) |>
+    mutate(mean = mean(TotalTime_ms), sd = sd(TotalTime_ms)) |>
+    filter(TotalTime_ms <= mean + 3 * sd) |>
+    filter(TotalTime_ms >= mean - 3 * sd) |>
+    select(-mean, -sd) |>
+    # Prepare for plotting
+    create_avgs_distr()
+```
+
+Next, the weak scaling measurements.
+
+```{r, echo=FALSE}
+poisson_solver_full_periodic_example <- all_weak_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "P | P | P | P | P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, Full Periodic, CPU API")
+poisson_solver_full_neumann_float_example <- all_weak_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "N | N | N | N | N | N",
+           Precision == "float") |>
+    mutate(ExampleName = "poisson-solver 3D, Float Prec, Full Neumann, CPU API")
+poisson_solver_full_dirichlet_gpu_example <- all_weak_distr_times |>
+    filter(API == "poisson-solver GPU",
+           Dimension == "3",
+           BCs == "D | D | D | D | D | D",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, Full Dirichlet, GPU API")
+poisson_solver_PNsNs_example <- all_weak_distr_times |>
+    filter(API == "poisson-solver CPU",
+           Dimension == "3",
+           BCs == "P | P | Ns | Ns | Ns | Ns",
+           Precision == "double") |>
+    mutate(ExampleName = "poisson-solver 3D, Double Prec, PNsNs, CPU API")
+poisson_solver_nonuniform_z_example <- all_weak_distr_times |>
+    filter(API == "poisson-solver CPU",
+        BCs == "P | P | P | P | Ns | Ns",
+        Uniformity == "nonuniform_z",
+        Precision == "double") |>
+    mutate(ExampleName = "poisson-solver Nonuniform Z, Double Prec, PPNs, CPU API")
+
+poisfft_full_periodic_example <- all_weak_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "P | P | P | P | P | P",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, Full Periodic")
+poisfft_full_neumann_float_example <- all_weak_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "N | N | N | N | N | N",
+           Precision == "float") |>
+    mutate(ExampleName = "PoisFFT 3D, Float Prec, Full Neumann")
+poisfft_full_dirichlet_example <- all_weak_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "D | D | D | D | D | D",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, Full Dirichlet")
+poisfft_PNsNs_example <- all_weak_distr_times |>
+    filter(API == "PoisFFT",
+           Dimension == "3",
+           BCs == "P | P | Ns | Ns | Ns | Ns",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT 3D, Double Prec, PNsNs")
+poisfft_nonuniform_z_example <- all_weak_distr_times |>
+    filter(API == "PoisFFT",
+           BCs == "P | P | P | P | Ns | Ns",
+           Uniformity == "nonuniform_z",
+           Precision == "double") |>
+    mutate(ExampleName = "PoisFFT Nonuniform Z, Double Prec, PPNs")
+
+show_warmup_iters_distr(poisson_solver_full_periodic_example)
+show_warmup_iters_distr(poisson_solver_full_neumann_float_example)
+show_warmup_iters_distr(poisson_solver_full_dirichlet_gpu_example)
+show_warmup_iters_distr(poisson_solver_PNsNs_example)
+show_warmup_iters_distr(poisson_solver_nonuniform_z_example)
+
+show_warmup_iters_distr(poisfft_full_periodic_example)
+show_warmup_iters_distr(poisfft_full_neumann_float_example)
+show_warmup_iters_distr(poisfft_full_dirichlet_example)
+show_warmup_iters_distr(poisfft_PNsNs_example)
+show_warmup_iters_distr(poisfft_nonuniform_z_example)
+```
+
+Here, it appears that the measurements have at most 6 warm-up iterations.
+We again discard those along with times greater than $3 \sigma$.
+```{r, include=FALSE}
+all_weak_distr_times <- all_weak_distr_times |>
+    filter(Iteration > 5) |>
+    num_procs_to_node_utilization() |>
+    group_by(Dimension, Precision, Uniformity, API, BCs, NumProcs) |>
+    mutate(mean = mean(TotalTime_ms), sd = sd(TotalTime_ms)) |>
+    filter(TotalTime_ms <= mean + 3 * sd) |>
+    filter(TotalTime_ms >= mean - 3 * sd) |>
+    select(-mean, -sd) |>
+    # Prepare for plotting
+    create_avgs_distr()
+```
 
 ### Strong Scaling
-TODO - Plot strong scaling of PoisFFT vs poisson-solver CPU API vs poisson-solver GPU API
+The plots can be found in `plots/distributed/strong_scaling`.
+
+```{r, include=FALSE}
+all_str_distr_times |>
+    group_by(Precision, Uniformity, BCs) |>
+    group_split() |>
+    map(plot_scaling, scaling_strength = "strong_scaling")
+```
+
+`poisson-solver` is faster than `PoisFFT` in all configurations.
+`poisson-solver GPU API` is faster than `CPU API` in every scenario and the factor by which it is faster correlates with local problem size.
+This is expected, as local problem shrinks, there is less data to be copied between the host and the device.
+
+`poisson-solver` doesn't scale well when adding new nodes.
+From one to two nodes, this is somewhat expected as that addition includes inter-node communication.
+From two to three nodes, there seems to be a plateau.
+Both could result from the fact that new node addition includes only two `Volta` GPUs while the communication is carried over 10Gb Ethernet.
+It would be better to measure this on nodes with InfiniBand connection and acquire measurements for more than 3 nodes (or at least more GPUs on those few nodes).
+`PoisFFT` sometimes exhibits similar behavior.
+The reason for not always exhibiting the same behavior could be due to FFT libraries transferring different amounts of data due to different packing strategies.
 
 ### Weak Scaling
-TODO - Plot weak scaling of PoisFFT vs poisson-solver CPU API vs poisson-solver GPU API
+The plots can be found in `plots/distributed/weak_scaling`.
 
-### Bottleneck Analysis
-TODO - Plot pipeline step time bars of APIs (in their most distributed form) and analyze
+```{r, include=FALSE}
+all_weak_distr_times |>
+    group_by(Precision, Uniformity, BCs) |>
+    group_split() |>
+    map(plot_scaling, scaling_strength = "weak_scaling")
+```
+We can see `poisson-solver` outperforming `PoisFFT` in every configuration.
+Once again, `poisson-solver GPU API` is faster than `CPU API`, this time by a constant factor (local problem size stays constant).
+The scaling appears to be $O(log(N))$ (previously reported scaling for `PoisFFT` [@PoisFFT]) for `poisson-solver` but with different logarithm bases for $<= 1$ node and $>= 1$ nodes.
+`PoisFFT` scaling appears to be $O(log(N))$ with $<= 1$ node but chaotic above that.
+
+### Bar Plot Analysis
+The plots can be found in `plots/distributed/bars`.
+The plots are made from the strong scaling data with three node utilization.
+Beware that full periodic configuration merges reshape and FFT times together because both are executed by an external library in the same FFT call.
+
+```{r, include=FALSE}
+all_str_distr_times |>
+    # Get correct stacking - poisson-solver individual times make up the total
+    mutate(AvgTotalTime_ms = ifelse(API == "PoisFFT",
+                                    AvgTotalTime_ms,
+                                    0)) |>
+    filter(`Node Utilization` == 3) |>
+    group_by(Precision, Uniformity, BCs) |>
+    group_split() |>
+    map(plot_bars_distr)
+```
+The clear trend is that reshapes take majority of the time.
+This could be again due to the Ethernet connection between nodes.
+Buffer copy times don't pose as significant bottleneck here.
 
 ### Speedups
-TODO - Just verify that the most performant versions are the most distributed ones (except for single-node versions)
-TODO - Print speedup table of PoisFFT vs poisson-solver CPU API vs poisson-solver GPU API
+The speedups can be found in `tables/`.
+
+```{r, include=FALSE}
+speedup_table <- all_str_distr_times |>
+    mutate(
+        AvgTotalTime_ms = ifelse(API == "PoisFFT",
+            AvgTotalTime_ms,
+            AvgBufferCopyTime_ms + AvgReshapeTime_ms + AvgFFTTime_ms + AvgKernelTime_ms
+            )
+    ) |>
+    select(BCs, Uniformity, Precision, `Node Utilization`, API, AvgTotalTime_ms) |>
+    # Each config has time for different APIs
+    pivot_wider(names_from = API, values_from = AvgTotalTime_ms) |>
+    # Compute speedups
+    mutate(
+        Speedup_CPU = PoisFFT / `poisson-solver CPU`,
+        Speedup_GPU = PoisFFT / `poisson-solver GPU`
+    ) |>
+    select(-"poisson-solver CPU", -"poisson-solver GPU", -"PoisFFT") |>
+    arrange(BCs, Uniformity, Precision, `Node Utilization`)
+
+table <- kable(
+    speedup_table,
+    format = "html",
+    digits = 3,
+    col.names = c(
+        "Dim", "BCs", "Uniformity", "Precision", "Node Utilization", "poisson-solver CPU API Speedup",
+        "poisson-solver GPU API Speedup"
+        ),
+    caption = "Speedup of poisson-solver compared to PoisFFT") |>
+    kable_styling(
+        bootstrap_options = c("striped", "hover"),
+        full_width = FALSE,
+    )
+save_kable(table, file = "tables/distributed_speedup_table.html")
+```
+These speedups reach `~4.6x` for `CPU API` and `~5x` for `GPU API` in 3 node utilization.
+However for most BCs, they are in the range of `1.2-1.5x`.
 
 ### Conclusion for Distributed Solvers
-TODO - Conclusion
+For distributed solvers `poisson-solver` improves `PoisFFT` in every scenario.
+The speedups aren't as impressive as for local solvers, this is largely due to the fact that this problem is communication-bound on the current cluster `volta` setup.
+
+From the measurements it is apparent that simply migrating the code onto a GPU provides some performance improvements.
+Revisiting this benchmark on a setup with InifiniBand connection could yield further insight into the bottlenecks of distributed solvers.
 
 ## ELMM
-TODO - The whole section
+We will evaluate `ELMM` using the [`channel`](https://bitbucket.org/LadaF/elmm/src/master/examples/channel/) example.
+The GPU version of `ELMM` can be found [here](https://github.com/mntjams/gpu-elmm).
+
+For the local setup, we will use `bw01` node, and for the distributed `volta[02,03,05]`.
+The grid size will be increased to 512 in each direction for the local setup and to 256 in each direction for distributed setup.
+The end time will be lowered to `0.1` for the local setup and to `0.5` for distributed setup.
+
+`ELMM` and `gpu-elmm` will be built using the `make_release` and `make_mpi_release` scripts.
+
+The boundary conditions will be:
+
+1. All `periodic`,
+2. `periodic` on all sides but top and bottom which will be `noslip`,
+3. all `noslip`.
+
+## Local Solvers {#elmm-local-solvers}
+You can find the results in `results/elmm-48-cores.txt`.
+
+The speedups of full periodic and full noslip (NeumannStag) are similar to those observed in the benchmarks.
+
+However PPNs speedup from `ELMM` is `~1.25x` while the benchmarks report `~2.15x`.
+We think this could be due to cache conflict misses but haven't investigated enough to confirm this.
+We only confirmed that with ghost cells present for `PoisFFT` in the benchmark the speedup really is `~1.25x`.
+
+We have updated the benchmarks to contain those ghost cells and plan to remeasure the data on 14.9.2026 when the cluster maintenance ends.
+
+## Distributed Solvers
+You can find the results in `results/elmm-distributed.txt`.
+
+The speedups are generally a bit lower than what was measured.
+We didn't expect perfect agreement as the speedup table was constructed using $512^3$ grid while this uses $256^3$ grid, however it is alarming that the speedups are consistently lower.
+This could be due to the issue described in the local solvers section above but the network communication times mitigate the problem to not be as apparent here as in the local case.
+
+Unfortunately most of `ELMM` is a CPU code which is significantly less parallelized when using the GPU setup (each process has its own GPU).
+This results in `gpu-elmm` being much slower than its CPU counterpart even though the solver itself is faster.
+
+This could be solved by either porting all of `ELMM` to GPU or at least implementing hybrid OpenMP + MPI parallelization for `ELMM` which would enable us to launch the job with less processes but parallelize them using a GPU as well as CPU threads.
 
 # References

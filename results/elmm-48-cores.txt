@@ -1,0 +1,59 @@
+512^3 grid, end time 0.1
+
+= Full Periodic =
+== ELMM + PoisFFT ==
+tstep:          151   time:     0.099025
+  dt:     0.000693
+tstep:          152   time:     0.099718
+  dt:     0.000282
+ Time limit reached.
+ Total wall clock time for time steps: 464.68
+ Wall clock time for Poisson solver: 35.06
+
+== gpu-elmm + poisson-solver ==
+tstep:          151   time:     0.099025
+  dt:     0.000693
+tstep:          152   time:     0.099718
+  dt:     0.000282
+ Time limit reached.
+ Total wall clock time for time steps: 448.46
+ Wall clock time for Poisson solver: 28.09
+
+= PPNs =
+== ELMM + PoisFFT ==
+tstep:          153   time:     0.098736
+  dt:     0.000684
+tstep:          154   time:     0.099421
+  dt:     0.000579
+ Time limit reached.
+ Total wall clock time for time steps: 471.68
+ Wall clock time for Poisson solver: 34.70
+
+== gpu-elmm + poisson-solver ==
+tstep:          153   time:     0.098736
+  dt:     0.000684
+tstep:          154   time:     0.099421
+  dt:     0.000579
+ Time limit reached.
+ Total wall clock time for time steps: 460.53
+ Wall clock time for Poisson solver: 27.79
+
+= Full NeumannStag =
+== ELMM + PoisFFT ==
+tstep:          161   time:     0.098846
+  dt:     0.000620
+tstep:          162   time:     0.099466
+  dt:     0.000534
+ Time limit reached.
+ Total wall clock time for time steps: 512.40
+ Wall clock time for Poisson solver: 45.14
+
+== gpu-elmm + poisson-solver ==
+tstep:          161   time:     0.098846
+  dt:     0.000620
+tstep:          162   time:     0.099466
+  dt:     0.000534
+ Time limit reached.
+ Total wall clock time for time steps: 489.75
+ Wall clock time for Poisson solver: 27.22
+
